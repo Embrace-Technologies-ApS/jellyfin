@@ -5,6 +5,7 @@ using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Moq;
 using Xunit;
 
@@ -54,5 +55,40 @@ public sealed class UserViewBuilderTests
         // The alternate's playback settles the movie, exactly as the item's own dto reports it.
         Assert.Equal([onlyWatchedOnAlternate.Id, watched.Id], played.Select(i => i.Id));
         Assert.Equal([unwatched.Id], unplayed.Select(i => i.Id));
+    }
+
+    [Fact]
+    public void Filter_HasAnyProviderIdTmdb_IncludesOnlyTheItemWithExactlyTheRequestedTmdbId()
+    {
+        var matching = CreateMovie("Requested TMDb id", "603");
+        var differentId = CreateMovie("Different TMDb id", "604");
+        var longerId = CreateMovie("Longer TMDb id", "6030");
+        var noTmdbId = CreateMovie("No TMDb id", null);
+
+        var items = new BaseItem[] { matching, differentId, longerId, noTmdbId };
+        var query = new InternalItemsQuery(_user)
+        {
+            HasAnyProviderId = new Dictionary<string, string> { [MetadataProvider.Tmdb.ToString()] = "603" }
+        };
+
+        var filtered = UserViewBuilder.Filter(
+            items,
+            _user,
+            query,
+            Mock.Of<IUserDataManager>(),
+            Mock.Of<ILibraryManager>()).ToList();
+
+        Assert.Equal([matching.Id], filtered.Select(i => i.Id));
+    }
+
+    private static Movie CreateMovie(string name, string? tmdbId)
+    {
+        var movie = new Movie { Id = Guid.NewGuid(), Name = name };
+        if (tmdbId is not null)
+        {
+            movie.ProviderIds[MetadataProvider.Tmdb.ToString()] = tmdbId;
+        }
+
+        return movie;
     }
 }
