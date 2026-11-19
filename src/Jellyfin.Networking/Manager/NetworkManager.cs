@@ -25,6 +25,11 @@ namespace Jellyfin.Networking.Manager;
 public class NetworkManager : INetworkManager, IDisposable
 {
     /// <summary>
+    /// IPv6 global-unicast prefix as defined in RFC 4291 (2000::/3).
+    /// </summary>
+    private static readonly IPNetwork IPv6GlobalUnicast = new IPNetwork(IPAddress.Parse("2000::"), 3);
+
+    /// <summary>
     /// Threading lock for network properties.
     /// </summary>
     private readonly Lock _initLock;
@@ -983,6 +988,39 @@ public class NetworkManager : INetworkManager, IDisposable
         return _interfaces.Where(x => IsInLocalNetwork(x.Address))
             .OrderBy(x => x.Index)
             .ToList();
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<IPData> GetPrivateAndGlobalAddresses()
+    {
+        return FilterPrivateAndGlobalAddresses(_interfaces);
+    }
+
+    /// <summary>
+    /// Selects the private IPv4 (RFC 1918) and global-unicast IPv6 addresses from a list of interface records.
+    /// </summary>
+    /// <param name="interfaces">The interface records to filter.</param>
+    /// <returns>The matching records, with their interface names preserved.</returns>
+    public static IReadOnlyList<IPData> FilterPrivateAndGlobalAddresses(IEnumerable<IPData> interfaces)
+    {
+        return interfaces.Where(i => IsPrivateOrGlobalAddress(i.Address)).ToArray();
+    }
+
+    /// <summary>
+    /// Checks whether an address is a private IPv4 (RFC 1918) or a global-unicast IPv6 address.
+    /// </summary>
+    /// <param name="address">The address to check.</param>
+    /// <returns><c>true</c> if the address is private IPv4 or global-unicast IPv6.</returns>
+    private static bool IsPrivateOrGlobalAddress(IPAddress address)
+    {
+        return address.AddressFamily switch
+        {
+            AddressFamily.InterNetwork => NetworkConstants.IPv4RFC1918PrivateClassA.Contains(address)
+                || NetworkConstants.IPv4RFC1918PrivateClassB.Contains(address)
+                || NetworkConstants.IPv4RFC1918PrivateClassC.Contains(address),
+            AddressFamily.InterNetworkV6 => IPv6GlobalUnicast.Contains(address),
+            _ => false
+        };
     }
 
     /// <inheritdoc/>
