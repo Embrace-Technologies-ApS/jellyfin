@@ -626,6 +626,18 @@ namespace Emby.Server.Implementations.Library
 
         private void DeleteItemPath(BaseItem item, bool isRequiredForDelete, FileSystemMetadata fileSystemInfo)
         {
+            // A stored path that is exactly a metadata root would be deleted recursively with every other item in it.
+            if (IsItemByNameMetadataRoot(fileSystemInfo.FullName))
+            {
+                _logger.LogWarning(
+                    "Refusing to delete metadata root, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                    item.GetType().Name,
+                    item.Name ?? "Unknown name",
+                    fileSystemInfo.FullName,
+                    item.Id);
+                return;
+            }
+
             if (Directory.Exists(fileSystemInfo.FullName) || File.Exists(fileSystemInfo.FullName))
             {
                 try
@@ -679,6 +691,29 @@ namespace Emby.Server.Implementations.Library
                     }
                 }
             }
+        }
+
+        private bool IsItemByNameMetadataRoot(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return false;
+            }
+
+            var applicationPaths = _configurationManager.ApplicationPaths;
+            var roots = new[]
+            {
+                applicationPaths.PeoplePath,
+                applicationPaths.GenrePath,
+                applicationPaths.MusicGenrePath,
+                applicationPaths.StudioPath,
+                applicationPaths.YearPath,
+                applicationPaths.ArtistsPath
+            };
+
+            var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            return roots.Any(root => !string.IsNullOrEmpty(root)
+                && string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)), fullPath, StringComparison.OrdinalIgnoreCase));
         }
 
         private bool IsInternalItem(BaseItem item)

@@ -85,6 +85,12 @@ namespace MediaBrowser.Controller.Entities
         {
             var validName = normalizeName ? GetItemByNameFolderName(name) : name;
 
+            // An empty component would resolve to the metadata root itself; fall back to the name-derived folder.
+            if (string.IsNullOrEmpty(validName))
+            {
+                validName = GetItemByNameFolderName(name);
+            }
+
             return System.IO.Path.Combine(ConfigurationManager.ApplicationPaths.GenrePath, validName);
         }
 

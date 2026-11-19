@@ -157,6 +157,98 @@ public class BaseItemTests
         Assert.Equal(BaseItem.GetItemByNameFolderName(name), BaseItem.GetItemByNameFolderName(name));
     }
 
+    [Theory]
+    [InlineData("???")]
+    [InlineData("***")]
+    [InlineData("...")]
+    public void GetItemByNameFolderName_NameWithoutValidCharacters_ReturnsStableNonEmptyFolderName(string name)
+    {
+        SetupFileSystemReplacingInvalidCharacters();
+
+        var folderName = BaseItem.GetItemByNameFolderName(name);
+
+        Assert.False(string.IsNullOrWhiteSpace(folderName));
+        Assert.Equal(folderName, BaseItem.GetItemByNameFolderName(name));
+    }
+
+    [Fact]
+    public void GetItemByNameFolderName_NamesWithoutValidCharacters_StayApart()
+    {
+        SetupFileSystemReplacingInvalidCharacters();
+
+        Assert.NotEqual(BaseItem.GetItemByNameFolderName("???"), BaseItem.GetItemByNameFolderName("***"));
+    }
+
+    [Theory]
+    [InlineData("???")]
+    [InlineData("")]
+    public void PersonGetPath_NameWithoutValidCharacters_IsBelowPeoplePath(string name)
+    {
+        var peoplePath = Path.Combine("metadata", "people");
+        WithPeoplePath(peoplePath, () =>
+        {
+            SetupFileSystemReplacingInvalidCharacters();
+
+            var personPath = Person.GetPath(name);
+
+            Assert.NotEqual(peoplePath, personPath);
+            Assert.StartsWith(peoplePath + Path.DirectorySeparatorChar, personPath, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void PersonGetPath_EmptyRebasedName_IsBelowPeoplePath()
+    {
+        var peoplePath = Path.Combine("metadata", "people");
+        WithPeoplePath(peoplePath, () =>
+        {
+            var personPath = Person.GetPath(string.Empty, false);
+
+            Assert.NotEqual(peoplePath, personPath);
+            Assert.StartsWith(peoplePath + Path.DirectorySeparatorChar, personPath, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void PersonGetPath_ValidName_IsStableAndBelowPeoplePath()
+    {
+        var peoplePath = Path.Combine("metadata", "people");
+        WithPeoplePath(peoplePath, () =>
+        {
+            SetupFileSystemReplacingInvalidCharacters();
+
+            var first = Person.GetPath("Jane Doe");
+
+            Assert.Equal(first, Person.GetPath("Jane Doe"));
+            Assert.StartsWith(peoplePath + Path.DirectorySeparatorChar, first, StringComparison.Ordinal);
+        });
+    }
+
+    private static void WithPeoplePath(string peoplePath, Action test)
+    {
+        var previousConfigManager = BaseItem.ConfigurationManager;
+        var configManager = new Mock<IServerConfigurationManager>();
+        configManager.Setup(c => c.ApplicationPaths.PeoplePath).Returns(peoplePath);
+        BaseItem.ConfigurationManager = configManager.Object;
+        try
+        {
+            test();
+        }
+        finally
+        {
+            BaseItem.ConfigurationManager = previousConfigManager;
+        }
+    }
+
+    private static void SetupFileSystemReplacingInvalidCharacters()
+    {
+        char[] invalidCharacters = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+        var fileSystem = new Mock<IFileSystem>();
+        fileSystem.Setup(x => x.GetValidFilename(It.IsAny<string>()))
+            .Returns((string name) => new string(name.Select(c => invalidCharacters.Contains(c) ? ' ' : c).ToArray()));
+        BaseItem.FileSystem = fileSystem.Object;
+    }
+
     private static void SetupPassThroughFileSystem()
     {
         var fileSystem = new Mock<IFileSystem>();
