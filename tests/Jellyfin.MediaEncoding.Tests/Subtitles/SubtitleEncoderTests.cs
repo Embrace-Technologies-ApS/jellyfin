@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -7,11 +8,17 @@ using System.Threading;
 using System.Threading.Tasks;
 using AutoFixture;
 using AutoFixture.AutoMoq;
+using MediaBrowser.Common;
+using MediaBrowser.Controller.IO;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Xunit;
 
 namespace Jellyfin.MediaEncoding.Subtitles.Tests
@@ -20,11 +27,17 @@ namespace Jellyfin.MediaEncoding.Subtitles.Tests
     {
         private const int StreamCount = 8;
         private const int CueCount = 500;
+        private const string SourcePath = "/media/movie.mkv";
+        private const string OutputPath = "/cache/subtitles/1.srt";
 
         // A Greek line that requires a non-UTF-8 legacy encoding to reproduce the bug. The accented
         // characters (ά, έ, ή, ί, ό, ύ, ώ) share the same code points in windows-1253 and iso-8859-7,
         // so a Greek-vs-Greek charset misdetection still round-trips correctly.
         private const string GreekText = "Καλημέρα κόσμε, αυτό είναι ένας υπότιτλος.";
+
+        private static readonly SubtitleEncoder.SubtitleExtractionProcessResult TimedOutResult = new(-1, string.Empty, true, 15);
+        private static readonly SubtitleEncoder.SubtitleExtractionProcessResult CallerCancelledResult = new(-1, string.Empty, false, 15);
+        private static readonly SubtitleEncoder.SubtitleExtractionProcessResult FailedResult = new(1, "Invalid data found when processing input", false, 15);
 
         static SubtitleEncoderTests()
         {
@@ -309,6 +322,304 @@ namespace Jellyfin.MediaEncoding.Subtitles.Tests
             }
         }
 
+        [Fact]
+        public async Task ExtractSubtitlesForFile_TimedOut_LogsFileAndTimeoutMinutesAndDeletesOutputs()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var fixture = CreateExtractionFixture(logger);
+            var fileSystem = fixture.Freeze<Mock<IFileSystem>>();
+            var encoder = fixture.Create<SubtitleEncoder>();
+            encoder.ProcessRunnerOverride = (_, _) => Task.FromResult(TimedOutResult);
+
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error
+                && e.Message.Contains(SourcePath, StringComparison.Ordinal)
+                && e.Message.Contains("timed out after 15 minutes", StringComparison.Ordinal));
+            fileSystem.Verify(f => f.DeleteFile(OutputPath), Times.Once);
+        }
+
+        [Fact]
+        public async Task ExtractSubtitlesForFile_TimedOut_DoesNotStartExtractionAgainBeforeCooldownExpires()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var encoder = CreateExtractionEncoder(logger, clock, out var runs);
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            clock.Advance(TimeSpan.FromMinutes(10) - TimeSpan.FromSeconds(1));
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            Assert.Equal(1, runs());
+        }
+
+        [Fact]
+        public async Task ExtractSubtitlesForFile_TimedOut_StartsExtractionAgainAfterCooldownExpires()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var encoder = CreateExtractionEncoder(logger, clock, out var runs);
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            clock.Advance(TimeSpan.FromMinutes(10));
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            Assert.Equal(2, runs());
+        }
+
+        [Fact]
+        public async Task ExtractSubtitlesForFile_NonTimeoutFailure_DoesNotStartCooldown()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var fixture = CreateExtractionFixture(logger);
+            var fileSystem = fixture.Freeze<Mock<IFileSystem>>();
+            var encoder = fixture.Create<SubtitleEncoder>();
+            encoder.Clock = clock;
+            var runs = 0;
+            encoder.ProcessRunnerOverride = (_, _) =>
+            {
+                runs++;
+                return Task.FromResult(FailedResult);
+            };
+
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            Assert.Equal(2, runs);
+            Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+            fileSystem.Verify(f => f.DeleteFile(OutputPath), Times.Exactly(2));
+        }
+
+        [Fact]
+        public async Task ExtractSubtitlesForFile_CallerCancellation_IsNotLoggedAsTimeoutOrCoolingDown()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var encoder = CreateExtractionFixture(logger).Create<SubtitleEncoder>();
+            var runs = 0;
+            encoder.ProcessRunnerOverride = (_, _) =>
+            {
+                runs++;
+                return Task.FromResult(CallerCancelledResult);
+            };
+
+            using (var cancellationSource = new CancellationTokenSource())
+            {
+                await cancellationSource.CancelAsync();
+                await Assert.ThrowsAsync<OperationCanceledException>(() => ExtractSubtitlesAsync(encoder, cancellationSource.Token));
+            }
+
+            Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+
+            await Assert.ThrowsAsync<FfmpegException>(() => ExtractSubtitlesAsync(encoder, TestContext.Current.CancellationToken));
+
+            Assert.Equal(2, runs);
+        }
+
+        [Fact]
+        public async Task ExtractAllExtractableSubtitles_EmbeddedTimeout_CoolsDownByMediaPath()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var cacheDirectory = CreateCacheDirectory();
+            try
+            {
+                var encoder = CreateSiteEncoder(logger, clock, cacheDirectory, out var runs);
+                var mediaSource = CreateMediaSource(new MediaStream
+                {
+                    Index = 2,
+                    Type = MediaStreamType.Subtitle,
+                    Codec = "subrip",
+                    SupportsExternalStream = true
+                });
+
+                await encoder.ExtractAllExtractableSubtitles(mediaSource, TestContext.Current.CancellationToken);
+                await encoder.ExtractAllExtractableSubtitles(mediaSource, TestContext.Current.CancellationToken);
+
+                Assert.Equal(1, runs());
+                AssertTimeoutLoggedForSource(logger, SourcePath);
+            }
+            finally
+            {
+                Directory.Delete(cacheDirectory, true);
+            }
+        }
+
+        [Fact]
+        public async Task ExtractAllExtractableSubtitles_MksTimeout_CoolsDownByMediaPath()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var cacheDirectory = CreateCacheDirectory();
+            try
+            {
+                var encoder = CreateSiteEncoder(logger, clock, cacheDirectory, out var runs);
+                var mediaSource = CreateMediaSource(new MediaStream
+                {
+                    Index = 3,
+                    Type = MediaStreamType.Subtitle,
+                    Codec = "subrip",
+                    Path = "/media/extras.mks",
+                    IsExternal = true,
+                    SupportsExternalStream = true
+                });
+
+                await encoder.ExtractAllExtractableSubtitles(mediaSource, TestContext.Current.CancellationToken);
+                await encoder.ExtractAllExtractableSubtitles(mediaSource, TestContext.Current.CancellationToken);
+
+                Assert.Equal(1, runs());
+                AssertTimeoutLoggedForSource(logger, SourcePath);
+                Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("extras.mks", StringComparison.Ordinal));
+            }
+            finally
+            {
+                Directory.Delete(cacheDirectory, true);
+            }
+        }
+
+        [Fact]
+        public async Task GetSubtitleFileCharacterSet_MksTextTimeout_CoolsDownByMediaPath()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var cacheDirectory = CreateCacheDirectory();
+            try
+            {
+                var encoder = CreateSiteEncoder(logger, clock, cacheDirectory, out var runs);
+                var subtitleStream = new MediaStream
+                {
+                    Index = 4,
+                    Type = MediaStreamType.Subtitle,
+                    Codec = "subrip",
+                    Path = "/media/extras.mks",
+                    IsExternal = true
+                };
+                var mediaSource = CreateMediaSource(subtitleStream);
+
+                await Assert.ThrowsAsync<FfmpegException>(() => encoder.GetSubtitleFileCharacterSet(subtitleStream, "eng", mediaSource, TestContext.Current.CancellationToken));
+                await Assert.ThrowsAsync<FfmpegException>(() => encoder.GetSubtitleFileCharacterSet(subtitleStream, "eng", mediaSource, TestContext.Current.CancellationToken));
+
+                Assert.Equal(1, runs());
+                AssertTimeoutLoggedForSource(logger, SourcePath);
+                Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("extras.mks", StringComparison.Ordinal));
+            }
+            finally
+            {
+                Directory.Delete(cacheDirectory, true);
+            }
+        }
+
+        [Fact]
+        public async Task GetReadableFile_ExternalTextConvertTimeout_CoolsDownByMediaPath()
+        {
+            var logger = new CapturingLogger<SubtitleEncoder>();
+            var clock = new FakeTimeProvider();
+            var cacheDirectory = CreateCacheDirectory();
+            try
+            {
+                var subtitlePath = Path.Combine(cacheDirectory, "extras.sub");
+                await File.WriteAllTextAsync(subtitlePath, "1\n00:00:01,000 --> 00:00:02,000\nHello\n", TestContext.Current.CancellationToken);
+
+                var encoder = CreateSiteEncoder(logger, clock, cacheDirectory, out var runs);
+                var subtitleStream = new MediaStream
+                {
+                    Index = 5,
+                    Type = MediaStreamType.Subtitle,
+                    Codec = "subrip",
+                    Path = subtitlePath,
+                    IsExternal = true
+                };
+                var mediaSource = CreateMediaSource(subtitleStream);
+
+                await Assert.ThrowsAsync<FfmpegException>(() => encoder.GetReadableFile(mediaSource, subtitleStream, TestContext.Current.CancellationToken));
+                await Assert.ThrowsAsync<FfmpegException>(() => encoder.GetReadableFile(mediaSource, subtitleStream, TestContext.Current.CancellationToken));
+
+                Assert.Equal(1, runs());
+                AssertTimeoutLoggedForSource(logger, SourcePath);
+                Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Error && e.Message.Contains("extras.sub", StringComparison.Ordinal));
+            }
+            finally
+            {
+                Directory.Delete(cacheDirectory, true);
+            }
+        }
+
+        private static string CreateCacheDirectory()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "jellyfin-subtitle-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private static MediaSourceInfo CreateMediaSource(MediaStream subtitleStream)
+        {
+            return new MediaSourceInfo
+            {
+                Id = "0123456789abcdef0123456789abcdef",
+                Path = SourcePath,
+                Protocol = MediaProtocol.File,
+                MediaStreams = [subtitleStream]
+            };
+        }
+
+        private static void AssertTimeoutLoggedForSource(CapturingLogger<SubtitleEncoder> logger, string sourcePath)
+        {
+            Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error
+                && e.Message.Contains(sourcePath, StringComparison.Ordinal)
+                && e.Message.Contains("timed out after 15 minutes", StringComparison.Ordinal));
+        }
+
+        private static SubtitleEncoder CreateSiteEncoder(CapturingLogger<SubtitleEncoder> logger, FakeTimeProvider clock, string cacheDirectory, out Func<int> runs)
+        {
+            var fixture = CreateExtractionFixture(logger);
+            fixture.Freeze<Mock<IPathManager>>()
+                .Setup(p => p.GetSubtitlePath(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>()))
+                .Returns((string _, int index, string extension) => Path.Combine(cacheDirectory, index.ToString(CultureInfo.InvariantCulture) + extension));
+            fixture.Freeze<Mock<IMediaSourceManager>>()
+                .Setup(m => m.GetPathProtocol(It.IsAny<string>()))
+                .Returns(MediaProtocol.File);
+            fixture.Freeze<Mock<ISubtitleParser>>()
+                .Setup(p => p.SupportsFileExtension(It.IsAny<string>()))
+                .Returns(false);
+
+            var encoder = fixture.Create<SubtitleEncoder>();
+            encoder.Clock = clock;
+            var count = 0;
+            encoder.ProcessRunnerOverride = (_, _) =>
+            {
+                count++;
+                return Task.FromResult(TimedOutResult);
+            };
+            runs = () => count;
+            return encoder;
+        }
+
+        private static IFixture CreateExtractionFixture(ILogger<SubtitleEncoder> logger)
+        {
+            var fixture = new Fixture().Customize(new AutoMoqCustomization { ConfigureMembers = true });
+            fixture.Inject(logger);
+            return fixture;
+        }
+
+        private static SubtitleEncoder CreateExtractionEncoder(CapturingLogger<SubtitleEncoder> logger, FakeTimeProvider clock, out Func<int> runs)
+        {
+            var encoder = CreateExtractionFixture(logger).Create<SubtitleEncoder>();
+            encoder.Clock = clock;
+            var count = 0;
+            encoder.ProcessRunnerOverride = (_, _) =>
+            {
+                count++;
+                return Task.FromResult(TimedOutResult);
+            };
+            runs = () => count;
+            return encoder;
+        }
+
+        private static Task ExtractSubtitlesAsync(SubtitleEncoder encoder, CancellationToken cancellationToken)
+        {
+            return encoder.ExtractSubtitlesForFile(SourcePath, SourcePath, "-y -i input", [OutputPath], cancellationToken);
+        }
+
         private static SubtitleEncoder CreateEncoder()
         {
             var fixture = new Fixture().Customize(new AutoMoqCustomization { ConfigureMembers = true });
@@ -352,6 +663,28 @@ namespace Jellyfin.MediaEncoding.Subtitles.Tests
             }
 
             return builder.ToString();
+        }
+
+        private sealed class FakeTimeProvider : TimeProvider
+        {
+            private DateTimeOffset _now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+            public void Advance(TimeSpan by) => _now += by;
+
+            public override DateTimeOffset GetUtcNow() => _now;
+        }
+
+        private sealed class CapturingLogger<T> : ILogger<T>
+        {
+            public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+                => Entries.Add((logLevel, formatter(state, exception)));
         }
     }
 }
