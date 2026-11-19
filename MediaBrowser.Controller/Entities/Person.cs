@@ -100,6 +100,12 @@ namespace MediaBrowser.Controller.Entities
         {
             var validFilename = normalizeName ? GetItemByNameFolderName(name) : name;
 
+            // An empty component would resolve to the People root itself; fall back to the name-derived folder.
+            if (string.IsNullOrEmpty(validFilename))
+            {
+                validFilename = GetItemByNameFolderName(name);
+            }
+
             string subFolderPrefix = null;
 
             foreach (char c in validFilename)
