@@ -666,6 +666,17 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
+            if (query.HasAnyProviderId is { Count: > 0 })
+            {
+                // Same semantics as the database path: an item matches when it carries any of the requested provider values exactly.
+                var matches = query.HasAnyProviderId.Any(p => string.Equals(item.GetProviderId(p.Key), p.Value, StringComparison.Ordinal));
+
+                if (!matches)
+                {
+                    return false;
+                }
+            }
+
             if (query.HasTvdbId.HasValue)
             {
                 var filterValue = query.HasTvdbId.Value;

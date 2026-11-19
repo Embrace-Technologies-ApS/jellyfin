@@ -167,6 +167,7 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="subtitleLanguages">Optional. If specified, results will be filtered based on subtitle language. This allows multiple, comma delimited values.</param>
     /// <param name="enableTotalRecordCount">Optional. Enable the total record count.</param>
     /// <param name="enableImages">Optional, include image information in output.</param>
+    /// <param name="tmdbId">Optional. If specified, results will be filtered to items whose TMDb id exactly equals this value.</param>
     /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the items.</returns>
     [HttpGet("Items")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -258,7 +259,8 @@ public class ItemsController : BaseJellyfinApiController
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] audioLanguages,
         [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] string[] subtitleLanguages,
         [FromQuery] bool enableTotalRecordCount = true,
-        [FromQuery] bool? enableImages = true)
+        [FromQuery] bool? enableImages = true,
+        [FromQuery] string? tmdbId = null)
     {
         var isApiKey = User.GetIsApiKey();
         // if api key is used (auth.IsApiKey == true), then `user` will be null throughout this method
@@ -405,6 +407,9 @@ public class ItemsController : BaseJellyfinApiController
             Is3D = is3D,
             HasTvdbId = hasTvdbId,
             HasTmdbId = hasTmdbId,
+            HasAnyProviderId = string.IsNullOrWhiteSpace(tmdbId)
+                ? null
+                : new Dictionary<string, string> { { MediaBrowser.Model.Entities.MetadataProvider.Tmdb.ToString(), tmdbId } },
             IsMovie = isMovie,
             IsSeries = isSeries,
             IsNews = isNews,

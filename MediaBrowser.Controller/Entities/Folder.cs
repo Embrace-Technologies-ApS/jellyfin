@@ -1422,6 +1422,11 @@ namespace MediaBrowser.Controller.Entities
                 return false;
             }
 
+            if (request.HasAnyProviderId is { Count: > 0 })
+            {
+                return false;
+            }
+
             if (request.HasTrailer.HasValue)
             {
                 return false;

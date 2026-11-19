@@ -127,6 +127,7 @@ namespace MediaBrowser.Controller.Entities
             || IsVirtualItem.HasValue
             || HasImdbId.HasValue
             || HasTmdbId.HasValue
+            || HasAnyProviderId is { Count: > 0 }
             || HasTvdbId.HasValue
             || HasOverview.HasValue
             || HasOfficialRating.HasValue
