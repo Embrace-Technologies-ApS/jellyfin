@@ -1,6 +1,7 @@
 #pragma warning disable CS1591
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -54,6 +55,16 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             o.PoolInitialFill = 1;
         });
 
+        /// <summary>
+        /// How long extraction of a source file is suppressed after its ffmpeg run timed out.
+        /// </summary>
+        private static readonly TimeSpan TimeoutRetryCooldown = TimeSpan.FromMinutes(10);
+
+        /// <summary>
+        /// Source file path to the time before which extraction of that file is not retried after a timeout.
+        /// </summary>
+        private readonly ConcurrentDictionary<string, DateTimeOffset> _timedOutExtractions = new(StringComparer.Ordinal);
+
         public SubtitleEncoder(
             ILogger<SubtitleEncoder> logger,
             IFileSystem fileSystem,
@@ -73,6 +84,16 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             _pathManager = pathManager;
             _serverConfigurationManager = serverConfigurationManager;
         }
+
+        /// <summary>
+        /// Gets or sets the clock used for the timeout cooldown. Only changed by the unit tests.
+        /// </summary>
+        internal TimeProvider Clock { get; set; } = TimeProvider.System;
+
+        /// <summary>
+        /// Gets or sets a replacement for the ffmpeg process run. Only set by the unit tests.
+        /// </summary>
+        internal Func<string, CancellationToken, Task<SubtitleExtractionProcessResult>>? ProcessRunnerOverride { get; set; }
 
         internal MemoryStream ConvertSubtitles(
             Stream stream,
@@ -466,6 +487,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             await ExtractSubtitlesForFile(
                 inputPath,
+                mediaSource.Path,
                 args,
                 [outputPath],
                 cancellationToken).ConfigureAwait(false);
@@ -643,7 +665,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                         outputPath.EscapeProcessArgument());
                 }
 
-                await ExtractSubtitlesForFile(inputPath, args, outputPaths, cancellationToken).ConfigureAwait(false);
+                await ExtractSubtitlesForFile(inputPath, mediaSource.Path, args, outputPaths, cancellationToken).ConfigureAwait(false);
 
                 foreach (var outputPath in outputPaths)
                 {
@@ -703,7 +725,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             if (outputPaths.Count > 0)
             {
-                await ExtractSubtitlesForFile(inputPath, args, outputPaths, cancellationToken).ConfigureAwait(false);
+                await ExtractSubtitlesForFile(inputPath, mediaSource.Path, args, outputPaths, cancellationToken).ConfigureAwait(false);
 
                 foreach (var outputPath in outputPaths)
                 {
@@ -712,13 +734,33 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             }
         }
 
-        private async Task ExtractSubtitlesForFile(
+        internal async Task ExtractSubtitlesForFile(
             string inputPath,
+            string sourcePath,
             string args,
             IReadOnlyList<string> outputPaths,
             CancellationToken cancellationToken)
         {
-            var (exitCode, ffmpegError) = await RunSubtitleExtractionProcess(args, cancellationToken).ConfigureAwait(false);
+            ThrowIfExtractionCoolingDown(sourcePath);
+
+            var outcome = ProcessRunnerOverride is null
+                ? await RunSubtitleExtractionProcess(args, cancellationToken).ConfigureAwait(false)
+                : await ProcessRunnerOverride(args, cancellationToken).ConfigureAwait(false);
+            var exitCode = outcome.ExitCode;
+            var ffmpegError = outcome.StandardError;
+
+            if (outcome.TimedOut)
+            {
+                _logger.LogError(
+                    "ffmpeg subtitle extraction timed out after {TimeoutMinutes} minutes for {SourcePath}; it will not be retried for {CooldownMinutes} minutes",
+                    outcome.TimeoutMinutes,
+                    sourcePath,
+                    TimeoutRetryCooldown.TotalMinutes);
+                if (!string.IsNullOrEmpty(sourcePath))
+                {
+                    _timedOutExtractions[sourcePath] = Clock.GetUtcNow() + TimeoutRetryCooldown;
+                }
+            }
 
             var failed = false;
 
@@ -790,6 +832,23 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             }
         }
 
+        private void ThrowIfExtractionCoolingDown(string sourcePath)
+        {
+            if (string.IsNullOrEmpty(sourcePath) || !_timedOutExtractions.TryGetValue(sourcePath, out var retryAfter))
+            {
+                return;
+            }
+
+            if (Clock.GetUtcNow() < retryAfter)
+            {
+                _logger.LogWarning("Skipping ffmpeg subtitle extraction for {SourcePath}: the previous extraction timed out; retry allowed after {RetryAfter:u}", sourcePath, retryAfter);
+                throw new FfmpegException(
+                    string.Format(CultureInfo.InvariantCulture, "ffmpeg subtitle extraction for {0} timed out and is cooling down until {1:u}", sourcePath, retryAfter));
+            }
+
+            _timedOutExtractions.TryRemove(new KeyValuePair<string, DateTimeOffset>(sourcePath, retryAfter));
+        }
+
         /// <summary>
         /// Extracts the text subtitle.
         /// </summary>
@@ -822,6 +881,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
                     await ExtractTextSubtitleInternal(
                         args,
+                        mediaSource.Path,
                         subtitleStreamIndex,
                         outputCodec,
                         outputPath,
@@ -832,6 +892,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
         private async Task ExtractTextSubtitleInternal(
             string inputPath,
+            string sourcePath,
             int subtitleStreamIndex,
             string outputCodec,
             string outputPath,
@@ -852,6 +913,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             await ExtractSubtitlesForFile(
                 inputPath,
+                sourcePath,
                 processArgs,
                 [outputPath],
                 cancellationToken).ConfigureAwait(false);
@@ -869,11 +931,13 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         /// </remarks>
         /// <param name="arguments">The ffmpeg command line arguments.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>The ffmpeg exit code (-1 on timeout) and its captured stderr output.</returns>
-        private async Task<(int ExitCode, string StandardError)> RunSubtitleExtractionProcess(string arguments, CancellationToken cancellationToken)
+        /// <returns>The ffmpeg exit code (-1 when killed), its captured stderr output, and whether the configured timeout elapsed.</returns>
+        private async Task<SubtitleExtractionProcessResult> RunSubtitleExtractionProcess(string arguments, CancellationToken cancellationToken)
         {
             int exitCode;
+            int timeoutMinutes;
             var standardError = string.Empty;
+            var timedOut = false;
 
             using (var process = new Process
             {
@@ -908,7 +972,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
                 // Begin draining stderr before waiting for exit; a full stderr pipe buffer would otherwise deadlock ffmpeg.
                 var standardErrorTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
-                var timeoutMinutes = _serverConfigurationManager.GetEncodingOptions().SubtitleExtractionTimeoutMinutes;
+                timeoutMinutes = _serverConfigurationManager.GetEncodingOptions().SubtitleExtractionTimeoutMinutes;
                 using var waitSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 waitSource.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
 
@@ -921,6 +985,8 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 {
                     process.Kill(true);
                     exitCode = -1;
+                    // The wait is cancelled either by the timeout or by the caller; only the timeout counts as a timeout.
+                    timedOut = !cancellationToken.IsCancellationRequested;
                 }
 
                 try
@@ -933,7 +999,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 }
             }
 
-            return (exitCode, standardError);
+            return new SubtitleExtractionProcessResult(exitCode, standardError, timedOut, timeoutMinutes);
         }
 
         /// <summary>
@@ -1049,6 +1115,15 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         {
             _semaphoreLocks.Dispose();
         }
+
+        /// <summary>
+        /// The outcome of one ffmpeg subtitle extraction run.
+        /// </summary>
+        /// <param name="ExitCode">The ffmpeg exit code, or -1 when the process was killed.</param>
+        /// <param name="StandardError">The captured ffmpeg stderr output.</param>
+        /// <param name="TimedOut">True when the configured extraction timeout elapsed (not when the caller cancelled).</param>
+        /// <param name="TimeoutMinutes">The configured extraction timeout in minutes.</param>
+        internal readonly record struct SubtitleExtractionProcessResult(int ExitCode, string StandardError, bool TimedOut, int TimeoutMinutes);
 
 #pragma warning disable CA1034 // Nested types should not be visible
         // Only public for the unit tests
