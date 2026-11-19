@@ -85,6 +85,25 @@ public class SystemController : BaseJellyfinApiController
         => Ok(SystemStorageDto.FromSystemStorageInfo(_systemManager.GetSystemStorageInfo()));
 
     /// <summary>
+    /// Gets the server's private IPv4 and global-unicast IPv6 addresses, each with its network interface name.
+    /// </summary>
+    /// <response code="200">Addresses retrieved.</response>
+    /// <response code="403">User does not have permission to retrieve network addresses.</response>
+    /// <returns>An array of <see cref="NetworkAddressDto"/> with the server's addresses.</returns>
+    [HttpGet("NetworkAddresses")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public ActionResult<NetworkAddressDto[]> GetNetworkAddresses()
+        => _networkManager.GetPrivateAndGlobalAddresses()
+            .Select(address => new NetworkAddressDto
+            {
+                Address = address.Address.ToString(),
+                InterfaceName = address.Name
+            })
+            .ToArray();
+
+    /// <summary>
     /// Gets public information about the server.
     /// </summary>
     /// <response code="200">Information retrieved.</response>

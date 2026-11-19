@@ -124,6 +124,13 @@ namespace MediaBrowser.Common.Net
         IReadOnlyList<IPData> GetInternalBindAddresses();
 
         /// <summary>
+        /// Returns the server's private IPv4 addresses (RFC 1918) and global-unicast IPv6 addresses.
+        /// Link-local, loopback and other non-global addresses are excluded.
+        /// </summary>
+        /// <returns>A list of the matching addresses, each carrying the name of its network interface.</returns>
+        IReadOnlyList<IPData> GetPrivateAndGlobalAddresses();
+
+        /// <summary>
         /// Checks if <paramref name="remoteIP"/> has access to the server.
         /// </summary>
         /// <param name="remoteIP">IP address of the client.</param>
