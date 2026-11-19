@@ -9,6 +9,7 @@ using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -644,6 +645,45 @@ public class UserLibraryController : BaseJellyfinApiController
             enableUserData,
             limit,
             groupItems);
+
+    /// <summary>
+    /// Gets the items a user played most recently.
+    /// </summary>
+    /// <param name="userId">User id.</param>
+    /// <param name="startIndex">Optional. The record index to start at. All items with a lower index will be dropped from the results.</param>
+    /// <param name="limit">Optional. The maximum number of records to return.</param>
+    /// <response code="200">Recently played items returned.</response>
+    /// <returns>A <see cref="QueryResult{BaseItemDto}"/> with the user's recently played items, newest first.</returns>
+    [HttpGet("Users/{userId}/RecentlyPlayed")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<QueryResult<BaseItemDto>> GetRecentlyPlayed(
+        [FromRoute, Required] Guid userId,
+        [FromQuery] int? startIndex,
+        [FromQuery] int? limit)
+    {
+        var user = _userManager.GetUserById(userId);
+        var dtoOptions = new DtoOptions();
+
+        var query = new InternalItemsQuery(user)
+        {
+            OrderBy = [(ItemSortBy.DatePlayed, SortOrder.Descending)],
+            IsPlayed = true,
+            Recursive = true,
+            IsVirtualItem = false,
+            StartIndex = startIndex + 1,
+            Limit = limit,
+            DtoOptions = dtoOptions,
+            EnableTotalRecordCount = true
+        };
+
+        var itemsResult = Task.Run(() => _libraryManager.GetItemsResult(query)).Result;
+        var dtos = _dtoService.GetBaseItemDtos(itemsResult.Items, dtoOptions, user);
+
+        return new QueryResult<BaseItemDto>(
+            startIndex,
+            itemsResult.TotalRecordCount,
+            dtos);
+    }
 
     private async Task RefreshOnDemandIfNeeded(BaseItem item)
     {
