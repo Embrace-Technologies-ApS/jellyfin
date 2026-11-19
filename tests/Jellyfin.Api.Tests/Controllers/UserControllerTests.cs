@@ -73,6 +73,38 @@ public class UserControllerTests
     }
 
     [Theory]
+    [AutoData]
+    public void GetUserById_WhenUserNotFound_ReturnsNotFoundWithMessage(Guid userId)
+    {
+        User? nullUser = null;
+        _mockUserManager
+            .Setup(m => m.GetUserById(userId))
+            .Returns(nullUser);
+
+        var result = _subject.GetUserById(userId);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result.Result);
+        Assert.Equal("No user exists with this id.", notFound.Value);
+    }
+
+#pragma warning disable CS0618 // AuthenticateUser is obsolete but still served; the test pins its response.
+    [Theory]
+    [AutoData]
+    public async Task AuthenticateUser_WhenUserNotFound_ReturnsNotFoundWithMessage(Guid userId, string pw)
+    {
+        User? nullUser = null;
+        _mockUserManager
+            .Setup(m => m.GetUserById(userId))
+            .Returns(nullUser);
+
+        var result = await _subject.AuthenticateUser(userId, pw);
+
+        var notFound = Assert.IsType<NotFoundObjectResult>(result.Result);
+        Assert.Equal("No user exists with this id.", notFound.Value);
+    }
+#pragma warning restore CS0618
+
+    [Theory]
     [InlineAutoData(null)]
     [InlineAutoData("")]
     [InlineAutoData("   ")]

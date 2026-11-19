@@ -134,7 +134,7 @@ public class UserController : BaseJellyfinApiController
 
         if (user is null)
         {
-            return NotFound("User not found");
+            return NotFound("No user exists with this id.");
         }
 
         var result = _userManager.GetUserDto(user, HttpContext.GetNormalizedRemoteIP().ToString());
@@ -189,7 +189,7 @@ public class UserController : BaseJellyfinApiController
 
         if (user is null)
         {
-            return NotFound("User not found");
+            return NotFound("No user exists with this id.");
         }
 
         AuthenticateUserByName request = new AuthenticateUserByName
