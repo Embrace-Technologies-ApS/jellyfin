@@ -628,6 +628,18 @@ namespace Emby.Server.Implementations.Library
         {
             if (Directory.Exists(fileSystemInfo.FullName) || File.Exists(fileSystemInfo.FullName))
             {
+                // The People root holds every person's metadata; no single item may remove it.
+                if (IsPeopleRootPath(fileSystemInfo.FullName))
+                {
+                    _logger.LogWarning(
+                        "Refusing to delete the People root, Type: {Type}, Name: {Name}, Path: {Path}, Id: {Id}",
+                        item.GetType().Name,
+                        item.Name ?? "Unknown name",
+                        fileSystemInfo.FullName,
+                        item.Id);
+                    return;
+                }
+
                 try
                 {
                     _logger.LogInformation(
@@ -679,6 +691,22 @@ namespace Emby.Server.Implementations.Library
                     }
                 }
             }
+        }
+
+        private bool IsPeopleRootPath(string path)
+        {
+            var peoplePath = _configurationManager.ApplicationPaths.PeoplePath;
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(peoplePath))
+            {
+                return false;
+            }
+
+            return string.Equals(NormalizeDirectoryPath(path), NormalizeDirectoryPath(peoplePath), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeDirectoryPath(string path)
+        {
+            return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
 
         private bool IsInternalItem(BaseItem item)
