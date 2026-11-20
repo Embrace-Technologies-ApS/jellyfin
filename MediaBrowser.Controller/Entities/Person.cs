@@ -4,6 +4,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
@@ -99,6 +101,13 @@ namespace MediaBrowser.Controller.Entities
         public static string GetPath(string name, bool normalizeName)
         {
             var validFilename = normalizeName ? GetItemByNameFolderName(name) : name;
+
+            // A name with no valid filename characters left (e.g. "???") would otherwise map to the People root itself.
+            // Derive a stable folder name from the whole name instead, so distinct names stay apart.
+            if (string.IsNullOrEmpty(validFilename))
+            {
+                validFilename = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name)));
+            }
 
             string subFolderPrefix = null;
 
