@@ -4,6 +4,7 @@ using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Linq;
 using System.Net.Mime;
+using System.Net.Sockets;
 using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Models.SystemInfoDtos;
 using MediaBrowser.Common.Api;
@@ -93,6 +94,33 @@ public class SystemController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ActionResult<PublicSystemInfo> GetPublicSystemInfo()
         => _systemManager.GetPublicSystemInfo(Request);
+
+    /// <summary>
+    /// Gets the server's LAN IPv4 addresses and global IPv6 addresses, with their interface names.
+    /// </summary>
+    /// <response code="200">Network addresses retrieved.</response>
+    /// <response code="403">User does not have permission to retrieve network addresses.</response>
+    /// <returns>A <see cref="NetworkAddressesDto"/> with the server's LAN IPv4 and global IPv6 addresses.</returns>
+    [HttpGet("NetworkAddresses")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public ActionResult<NetworkAddressesDto> GetNetworkAddresses()
+    {
+        var addresses = _networkManager.GetNetworkAddresses();
+
+        return new NetworkAddressesDto
+        {
+            LanIpv4Addresses = addresses
+                .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
+                .Select(ToNetworkAddressDto)
+                .ToArray(),
+            GlobalIpv6Addresses = addresses
+                .Where(x => x.Address.AddressFamily == AddressFamily.InterNetworkV6)
+                .Select(ToNetworkAddressDto)
+                .ToArray()
+        };
+    }
 
     /// <summary>
     /// Pings the system.
@@ -225,4 +253,11 @@ public class SystemController : BaseJellyfinApiController
         FileStream stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, fileShare, IODefaults.FileStreamBufferSize, FileOptions.Asynchronous);
         return File(stream, "text/plain; charset=utf-8");
     }
+
+    private static NetworkAddressDto ToNetworkAddressDto(IPData data)
+        => new NetworkAddressDto
+        {
+            Address = data.Address.ToString(),
+            InterfaceName = data.Name
+        };
 }
