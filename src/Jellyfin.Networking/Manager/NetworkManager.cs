@@ -986,6 +986,42 @@ public class NetworkManager : INetworkManager, IDisposable
     }
 
     /// <inheritdoc/>
+    public IReadOnlyList<IPData> GetNetworkAddresses()
+    {
+        return FilterNetworkAddresses(_interfaces);
+    }
+
+    /// <summary>
+    /// Filters interface addresses down to RFC 1918 private IPv4 addresses and global-unicast IPv6 addresses.
+    /// Link-local and other non-global IPv6 addresses, and public IPv4 addresses, are excluded.
+    /// </summary>
+    /// <param name="interfaces">The interface addresses to filter.</param>
+    /// <returns>The matching interface addresses, ordered by interface index, with their interface names preserved.</returns>
+    public static IReadOnlyList<IPData> FilterNetworkAddresses(IEnumerable<IPData> interfaces)
+    {
+        return interfaces.Where(IsRfc1918OrGlobalIPv6)
+            .OrderBy(x => x.Index)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Checks whether an interface address is an RFC 1918 private IPv4 address or a global-unicast IPv6 address.
+    /// </summary>
+    /// <param name="data">The interface address to check.</param>
+    /// <returns><c>true</c> if the address is RFC 1918 IPv4 or global-unicast IPv6, <c>false</c> otherwise.</returns>
+    private static bool IsRfc1918OrGlobalIPv6(IPData data)
+    {
+        return data.Address.AddressFamily switch
+        {
+            AddressFamily.InterNetwork => NetworkConstants.IPv4RFC1918PrivateClassA.Contains(data.Address)
+                || NetworkConstants.IPv4RFC1918PrivateClassB.Contains(data.Address)
+                || NetworkConstants.IPv4RFC1918PrivateClassC.Contains(data.Address),
+            AddressFamily.InterNetworkV6 => NetworkConstants.IPv6RFC4291GlobalUnicast.Contains(data.Address),
+            _ => false
+        };
+    }
+
+    /// <inheritdoc/>
     public bool IsInLocalNetwork(string address)
     {
         if (NetworkUtils.TryParseToSubnet(address, out var subnet))

@@ -76,4 +76,9 @@ public static class NetworkConstants
     /// IPv6 unique local as defined in RFC 4193.
     /// </summary>
     public static readonly IPNetwork IPv6RFC4193UniqueLocal = new IPNetwork(IPAddress.Parse("fc00::"), 7);
+
+    /// <summary>
+    /// IPv6 global unicast address space as defined in RFC 4291.
+    /// </summary>
+    public static readonly IPNetwork IPv6RFC4291GlobalUnicast = new IPNetwork(IPAddress.Parse("2000::"), 3);
 }
